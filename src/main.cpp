@@ -130,7 +130,7 @@ void readEncoderISR() {
   unsigned long now = micros();
 
   // Debounce
-  if (now - lastISRTime < 1000) {
+  if (now - lastISRTime < 1200) {
     return;
   }
 
@@ -181,8 +181,8 @@ void handleEncoder() {
 
   int newSong = songNumber + (delta * stepSize);
 
-  if (newSong > 99) newSong = 99;
-  if (newSong < 1)  newSong = 1;
+  if (newSong > 99) newSong = 1;
+  if (newSong < 1)  newSong = 99;
 
   songNumber = newSong;
 
