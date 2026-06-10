@@ -1,470 +1,450 @@
+#include <Arduino.h>
+#include <TM1637Display.h>
 #include <SoftwareSerial.h>
 #include <DFRobotDFPlayerMini.h>
-#include <TM1637Display.h>
-
-// ======================================================
-// CONFIG
-// ======================================================
-
-#define TEST_MODE false  // Set to true to test without MP3 module
 
 // ======================================================
 // PINS
 // ======================================================
 
-// Rotary Encoder
-#define ENC_CLK 3      // Interrupt pin
-#define ENC_DT  4
-#define ENC_SW  5
+#define ENC_CLK   3
+#define ENC_DT    4
+#define ENC_SW    5
 
-// Buttons
-#define PAUSE_BTN 9
 #define VOL_UP    8
+#define PAUSE_BTN 9
 #define VOL_DOWN  10
 
-// DFPlayer
+#define DISP_CLK  6
+#define DISP_DIO  7
+
 #define DF_RX 11
 #define DF_TX 12
 
-// TM1637
-#define DISP_CLK 6
-#define DISP_DIO 7
-
 // ======================================================
-// OBJECTS
+// HARDWARE
 // ======================================================
 
-SoftwareSerial dfSerial(DF_RX, DF_TX);
-DFRobotDFPlayerMini dfPlayer;
 TM1637Display display(DISP_CLK, DISP_DIO);
 
+SoftwareSerial mp3Serial(DF_RX, DF_TX);
+DFRobotDFPlayerMini dfplayer;
+
 // ======================================================
-// VARIABLES
+// MODES
 // ======================================================
 
-volatile int8_t encoderDelta = 0;
+enum Mode
+{
+    MODE_FOLDER,
+    MODE_SONG
+};
+
+Mode mode = MODE_FOLDER;
+
+// ======================================================
+// STATE
+// ======================================================
+
+volatile int encoderDelta = 0;
 volatile unsigned long lastISRTime = 0;
 
-uint8_t songNumber = 1;
-uint8_t volumeLevel = 10;
+int folder = 1;     // 1–12
+int song   = 1;     // 1–10 (inside folder)
+int volume = 15;
 
-// States
-bool isPlaying = false;
-bool isPaused  = false;
+bool isPlaying = true;
 
-// Display timeout
-bool showingStatus = false;
-unsigned long statusDisplayTime = 0;
+bool folderPlaying = false;
+int currentTrackInFolder = 1;
 
-// Button states
-bool lastPlayBtnState   = HIGH;
-bool lastPauseBtnState  = HIGH;
-bool lastVolUpState     = HIGH;
-bool lastVolDownState   = HIGH;
+// ======================================================
+// DISPLAY CONTROL
+// ======================================================
 
-// Encoder speed
-unsigned long lastMoveTime = 0;
+enum DisplayState
+{
+    SHOW_FOLDER,
+    SHOW_SONG,
+    SHOW_VOLUME,
+    SHOW_MESSAGE
+};
+
+DisplayState displayState = SHOW_FOLDER;
+
+unsigned long messageUntil = 0;
+
+// ======================================================
+// DEBOUNCE
+// ======================================================
+
+unsigned long lastVolUpTime = 0;
+unsigned long lastVolDownTime = 0;
+unsigned long lastPauseTime = 0;
+
+const unsigned long DEBOUNCE = 250;
 
 // ======================================================
 // DISPLAY HELPERS
 // ======================================================
 
-void showNumber() {
+void showFolder()
+{
+    uint8_t segs[4];
 
-  display.showNumberDec(songNumber, false);
+    // F
+    segs[0] = SEG_A | SEG_E | SEG_F | SEG_G;
 
-  if (TEST_MODE) {
-    Serial.print("Song: ");
-    Serial.println(songNumber);
-  }
-}
+    // '-'
+    segs[1] = SEG_G;
 
-void displayPLAY() {
+    // tens digit (always shown, even if 0)
+    int tens = folder / 10;
+    int ones = folder % 10;
 
-  uint8_t data[] = {
-    0x73, // P
-    0x38, // L
-    0x77, // A
-    0x6E  // Y
-  };
-
-  display.setSegments(data);
-
-  if (TEST_MODE) {
-    Serial.println("DISPLAY: PLAY");
-  }
-}
-
-void displayPAUS() {
-
-  uint8_t data[] = {
-    0x73, // P
-    0x77, // A
-    0x3E, // U
-    0x6D  // S
-  };
-
-  display.setSegments(data);
-
-  if (TEST_MODE) {
-    Serial.println("DISPLAY: PAUS");
-  }
-}
-
-void displayVOL() {
-
-  display.showNumberDec(volumeLevel, false);
-
-  if (TEST_MODE) {
-    Serial.print("Volume: ");
-    Serial.println(volumeLevel);
-  }
-}
-
-// ======================================================
-// ROTARY ENCODER ISR
-// ======================================================
-
-void readEncoderISR() {
-
-  unsigned long now = micros();
-
-  // Debounce
-  if (now - lastISRTime < 1200) {
-    return;
-  }
-
-  lastISRTime = now;
-
-  // Direction
-  if (digitalRead(ENC_CLK) == digitalRead(ENC_DT)) {
-    encoderDelta--;
-  }
-  else {
-    encoderDelta++;
-  }
-}
-
-// ======================================================
-// HANDLE ENCODER
-// ======================================================
-
-void handleEncoder() {
-
-  int8_t delta = 0;
-
-  noInterrupts();
-  delta = encoderDelta;
-  encoderDelta = 0;
-  interrupts();
-
-  if (delta == 0) {
-    return;
-  }
-
-  unsigned long now = millis();
-  unsigned long speed = now - lastMoveTime;
-  lastMoveTime = now;
-
-  int stepSize;
-
-  // Speed acceleration
-  if (speed < 30) {
-    stepSize = 10;
-  }
-  else if (speed < 80) {
-    stepSize = 3;
-  }
-  else {
-    stepSize = 1;
-  }
-
-  int newSong = songNumber + (delta * stepSize);
-
-  if (newSong > 99) newSong = 1;
-  if (newSong < 1)  newSong = 99;
-
-  songNumber = newSong;
-
-  if (!showingStatus && !isPaused) {
-    showNumber();
-  }
-
-  if (TEST_MODE) {
-    Serial.print("Selected Song: ");
-    Serial.println(songNumber);
-  }
-}
-
-// ======================================================
-// PLAY BUTTON
-// ======================================================
-
-void handlePlayButton() {
-
-  bool currentState = digitalRead(ENC_SW);
-
-  if (lastPlayBtnState == HIGH &&
-      currentState == LOW) {
-
-    delay(20);
-
-    if (digitalRead(ENC_SW) == LOW) {
-
-      if (!TEST_MODE) {
-
-        dfPlayer.stop();
-        delay(100);
-
-        dfPlayer.play(songNumber);
-      }
-
-      displayPLAY();
-
-      isPlaying = true;
-      isPaused  = false;
-
-      showingStatus = true;
-      statusDisplayTime = millis();
-
-      if (TEST_MODE) {
-        Serial.print("PLAY SONG: ");
-        Serial.println(songNumber);
-      }
+    // FORCE leading zero formatting logic
+    if (tens == 0)
+    {
+        segs[2] = display.encodeDigit(0);   // forced '0'
+        segs[3] = display.encodeDigit(ones);
     }
-  }
-
-  lastPlayBtnState = currentState;
-}
-
-// ======================================================
-// PAUSE BUTTON
-// ======================================================
-
-void handlePauseButton() {
-
-  bool currentState = digitalRead(PAUSE_BTN);
-
-  if (lastPauseBtnState == HIGH &&
-      currentState == LOW) {
-
-    delay(20);
-
-    if (digitalRead(PAUSE_BTN) == LOW &&
-        isPlaying) {
-
-      if (!isPaused) {
-
-        if (!TEST_MODE) {
-          dfPlayer.pause();
-        }
-
-        displayPAUS();
-
-        isPaused = true;
-
-        if (TEST_MODE) {
-          Serial.println("PAUSED");
-        }
-      }
-      else {
-
-        if (!TEST_MODE) {
-          dfPlayer.start();
-        }
-
-        displayPLAY();
-
-        isPaused = false;
-
-        if (TEST_MODE) {
-          Serial.println("RESUMED");
-        }
-      }
-
-      showingStatus = true;
-      statusDisplayTime = millis();
+    else
+    {
+        segs[2] = display.encodeDigit(tens);
+        segs[3] = display.encodeDigit(ones);
     }
-  }
 
-  lastPauseBtnState = currentState;
+    display.setSegments(segs);
+}
+
+void showSong()
+{
+    display.showNumberDec(song, false);
+}
+
+void showVolume()
+{
+    display.showNumberDec(volume, false);
+}
+
+void showPLAY()
+{
+    const uint8_t seg[] =
+    {
+        SEG_A | SEG_B | SEG_E | SEG_F | SEG_G,          // P
+        SEG_D | SEG_E | SEG_F,                          // L
+        SEG_A | SEG_B | SEG_C | SEG_E | SEG_F | SEG_G,  // A
+        SEG_B | SEG_C                                   // I
+    };
+
+    display.setSegments(seg);
+}
+
+void showPAUS()
+{
+    const uint8_t seg[] =
+    {
+        SEG_A | SEG_B | SEG_E | SEG_F | SEG_G,          // P
+        SEG_A | SEG_B | SEG_C | SEG_E | SEG_F | SEG_G,  // A
+        SEG_B | SEG_C | SEG_D | SEG_E | SEG_F,          // U
+        SEG_A | SEG_C | SEG_D | SEG_F | SEG_G           // S
+    };
+
+    display.setSegments(seg);
+}
+
+void showSEL()
+{
+    const uint8_t seg[] =
+    {
+        SEG_A | SEG_F | SEG_G | SEG_C | SEG_D,  // S
+        SEG_D | SEG_E | SEG_F,                  // E
+        SEG_D | SEG_E | SEG_F                   // L (approx)
+    };
+
+    display.setSegments(seg);
 }
 
 // ======================================================
-// VOLUME UP
+// DFPLAYER ACTIONS
 // ======================================================
 
-void handleVolumeUp() {
+void playFolder()
+{
+    currentTrackInFolder = 1;
+    folderPlaying = true;
 
-  bool currentState = digitalRead(VOL_UP);
+    dfplayer.playFolder(folder, currentTrackInFolder);
+}
 
-  if (lastVolUpState == HIGH &&
-      currentState == LOW) {
+void playSong()
+{
+    Serial.print("PLAY SONG: ");
+    Serial.print(song);
+    Serial.print(" FROM FOLDER ");
+    Serial.println(folder);
+    folderPlaying = false;
+    dfplayer.playFolder(folder, song);
+}
 
-    delay(20);
+// ======================================================
+// ENCODER ISR
+// ======================================================
 
-    if (digitalRead(VOL_UP) == LOW) {
+void encoderISR()
+{
+    unsigned long now = micros();
 
-      if (volumeLevel < 30) {
-        volumeLevel++;
-      }
+    if (now - lastISRTime < 800)
+        return;
 
-      if (!TEST_MODE) {
-        dfPlayer.volume(volumeLevel);
-      }
+    lastISRTime = now;
 
-      displayVOL();
+    bool clk = digitalRead(ENC_CLK);
+    bool dt  = digitalRead(ENC_DT);
 
-      showingStatus = true;
-      statusDisplayTime = millis();
-
-      if (TEST_MODE) {
-        Serial.print("VOL UP: ");
-        Serial.println(volumeLevel);
-      }
+    if (clk == LOW)
+    {
+        if (dt != clk)
+            encoderDelta++;
+        else
+            encoderDelta--;
     }
-  }
-
-  lastVolUpState = currentState;
-}
-
-// ======================================================
-// VOLUME DOWN
-// ======================================================
-
-void handleVolumeDown() {
-
-  bool currentState = digitalRead(VOL_DOWN);
-
-  if (lastVolDownState == HIGH &&
-      currentState == LOW) {
-
-    delay(20);
-
-    if (digitalRead(VOL_DOWN) == LOW) {
-
-      if (volumeLevel > 0) {
-        volumeLevel--;
-      }
-
-      if (!TEST_MODE) {
-        dfPlayer.volume(volumeLevel);
-      }
-
-      displayVOL();
-
-      showingStatus = true;
-      statusDisplayTime = millis();
-
-      if (TEST_MODE) {
-        Serial.print("VOL DOWN: ");
-        Serial.println(volumeLevel);
-      }
-    }
-  }
-
-  lastVolDownState = currentState;
-}
-
-// ======================================================
-// DISPLAY TIMEOUT
-// ======================================================
-
-void handleDisplayTimeout() {
-
-  // Keep PAUS permanently while paused
-  if (isPaused) {
-    return;
-  }
-
-  if (showingStatus &&
-      millis() - statusDisplayTime >= 3000) {
-
-    showingStatus = false;
-
-    showNumber();
-
-    if (TEST_MODE) {
-      Serial.println("Back to Song Display");
-    }
-  }
-}
-
-// ======================================================
-// DFPLAYER INIT
-// ======================================================
-
-void initDFPlayer() {
-
-  dfSerial.begin(9600);
-
-  if (dfPlayer.begin(dfSerial)) {
-
-    dfPlayer.volume(volumeLevel);
-
-    Serial.println("DFPlayer Ready");
-  }
-  else {
-
-    Serial.println("DFPlayer NOT detected");
-  }
 }
 
 // ======================================================
 // SETUP
 // ======================================================
 
-void setup() {
+void setup()
+{
+    Serial.begin(9600);
+    delay(2000); // VERY IMPORTANT
+    Serial.println("Starting DFPlayer...");
 
-  Serial.begin(115200);
+    pinMode(ENC_CLK, INPUT_PULLUP);
+    pinMode(ENC_DT, INPUT_PULLUP);
+    pinMode(ENC_SW, INPUT_PULLUP);
 
-  // Inputs
-  pinMode(ENC_CLK, INPUT_PULLUP);
-  pinMode(ENC_DT, INPUT_PULLUP);
-  pinMode(ENC_SW, INPUT_PULLUP);
+    pinMode(VOL_UP, INPUT_PULLUP);
+    pinMode(VOL_DOWN, INPUT_PULLUP);
+    pinMode(PAUSE_BTN, INPUT_PULLUP);
 
-  pinMode(PAUSE_BTN, INPUT_PULLUP);
-  pinMode(VOL_UP, INPUT_PULLUP);
-  pinMode(VOL_DOWN, INPUT_PULLUP);
+    display.setBrightness(7);
 
-  // Display
-  display.setBrightness(3);
+    mp3Serial.begin(9600);
 
-  showNumber();
+    if (!dfplayer.begin(mp3Serial))
+    {
+        Serial.println("DFPLAYER ERROR");
+        while (true);
+    }
 
-  // Encoder interrupt
-  attachInterrupt(
-    digitalPinToInterrupt(ENC_CLK),
-    readEncoderISR,
-    FALLING
-  );
+    dfplayer.volume(volume);
+    // ==================================================
+    // FORCE START STATE (IMPORTANT)
+    // ==================================================
 
-  // DFPlayer
-  if (!TEST_MODE) {
-    initDFPlayer();
-  }
+    mode = MODE_FOLDER;
+    displayState = SHOW_FOLDER;
 
-  Serial.println();
-  Serial.println("======================");
-  Serial.println("SYSTEM READY");
-  Serial.println("======================");
+    folder = 1;
+    song = 1;
+    showFolder();
+
+    attachInterrupt(digitalPinToInterrupt(ENC_CLK), encoderISR, CHANGE);
+
+    Serial.println("SYSTEM READY");
 }
 
 // ======================================================
-// MAIN LOOP
+// LOOP
 // ======================================================
 
-void loop() {
+void loop()
+{
+    unsigned long now = millis();
 
-  handleEncoder();
+    // ==================================================
+    // ENCODER ROTATION
+    // ==================================================
 
-  handlePlayButton();
+    if (encoderDelta != 0)
+    {
+        noInterrupts();
+        int delta = encoderDelta;
+        encoderDelta = 0;
+        interrupts();
 
-  handlePauseButton();
+        if (mode == MODE_FOLDER)
+        {
+            folder += delta;
 
-  handleVolumeUp();
+            if (folder > 12) folder = 1;
+            if (folder < 1) folder = 12;
 
-  handleVolumeDown();
+            showFolder();
 
-  handleDisplayTimeout();
+            Serial.print("FOLDER: ");
+            Serial.println(folder);
+        }
+        else
+        {
+            song += delta;
+
+            if (song > 10) song = 1;
+            if (song < 1) song = 10;
+
+            showSong();
+
+            Serial.print("SONG: ");
+            Serial.println(song);
+        }
+    }
+
+    // ==================================================
+    // ENCODER PRESS (short = play, long = toggle mode)
+    // ==================================================
+
+    static unsigned long pressStart = 0;
+    static bool pressed = false;
+
+    if (digitalRead(ENC_SW) == LOW && !pressed)
+    {
+        pressed = true;
+        pressStart = now;
+    }
+
+    if (digitalRead(ENC_SW) == HIGH && pressed)
+    {
+        pressed = false;
+
+        unsigned long duration = now - pressStart;
+
+        if (duration > 800)
+        {
+            // LONG PRESS → toggle mode
+            if (mode == MODE_FOLDER)
+                mode = MODE_SONG;
+            else
+                mode = MODE_FOLDER;
+
+            showSEL();
+            displayState = SHOW_MESSAGE;
+            messageUntil = now + 1500;
+
+            Serial.println("MODE TOGGLED");
+        }
+        else
+        {
+            // SHORT PRESS
+            if (mode == MODE_FOLDER)
+                playFolder();
+            else
+                playSong();
+        }
+    }
+
+    if (folderPlaying && dfplayer.available())
+    {
+        uint8_t type = dfplayer.readType();
+
+        if (type == DFPlayerPlayFinished)
+        {
+            currentTrackInFolder++;
+
+            if (currentTrackInFolder > 10)
+            {
+                folderPlaying = false;
+            }
+            else
+            {
+                dfplayer.playFolder(folder, currentTrackInFolder);
+            }
+        }
+    }    
+
+    // ==================================================
+    // VOLUME UP
+    // ==================================================
+
+    if (digitalRead(VOL_UP) == LOW &&
+        now - lastVolUpTime > DEBOUNCE)
+    {
+        if (volume < 30) volume++;
+
+        dfplayer.volume(volume);
+
+        showVolume();
+        displayState = SHOW_VOLUME;
+        messageUntil = now + 1000;
+
+        Serial.print("VOL: ");
+        Serial.println(volume);
+
+        lastVolUpTime = now;
+    }
+
+    // ==================================================
+    // VOLUME DOWN
+    // ==================================================
+
+    if (digitalRead(VOL_DOWN) == LOW &&
+        now - lastVolDownTime > DEBOUNCE)
+    {
+        if (volume > 0) volume--;
+
+        dfplayer.volume(volume);
+
+        showVolume();
+        displayState = SHOW_VOLUME;
+        messageUntil = now + 1000;
+
+        Serial.print("VOL: ");
+        Serial.println(volume);
+
+        lastVolDownTime = now;
+    }
+
+    // ==================================================
+    // PAUSE BUTTON
+    // ==================================================
+
+    if (digitalRead(PAUSE_BTN) == LOW &&
+        now - lastPauseTime > DEBOUNCE)
+    {
+        isPlaying = !isPlaying;
+
+        if (isPlaying)
+        {
+            dfplayer.start();     // Resume playback
+            showPLAY();
+        }
+        else
+        {
+            dfplayer.pause();     // Pause playback
+            showPAUS();
+        }
+
+        displayState = SHOW_MESSAGE;
+        messageUntil = now + 3000;
+
+        lastPauseTime = now;
+    }
+
+    // ==================================================
+    // RESTORE DISPLAY
+    // ==================================================
+
+    if (displayState != SHOW_FOLDER &&
+        displayState != SHOW_SONG &&
+        millis() > messageUntil)
+    {
+        if (mode == MODE_FOLDER)
+            showFolder();
+        else
+            showSong();
+
+        displayState = (mode == MODE_FOLDER) ? SHOW_FOLDER : SHOW_SONG;
+    }
 }
