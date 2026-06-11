@@ -134,7 +134,7 @@ void showPLAY()
         SEG_A | SEG_B | SEG_E | SEG_F | SEG_G,          // P
         SEG_D | SEG_E | SEG_F,                          // L
         SEG_A | SEG_B | SEG_C | SEG_E | SEG_F | SEG_G,  // A
-        SEG_B | SEG_C                                   // I
+        SEG_B | SEG_C | SEG_D | SEG_F | SEG_G           // Y
     };
 
     display.setSegments(seg);
@@ -157,9 +157,10 @@ void showSEL()
 {
     const uint8_t seg[] =
     {
-        SEG_A | SEG_F | SEG_G | SEG_C | SEG_D,  // S
-        SEG_D | SEG_E | SEG_F,                  // E
-        SEG_D | SEG_E | SEG_F                   // L (approx)
+        SEG_A | SEG_F | SEG_G | SEG_C | SEG_D,          // S
+        SEG_A | SEG_D | SEG_E | SEG_F | SEG_G,          // E
+        SEG_D | SEG_E | SEG_F,                          // L
+        0x00                                            // (blank)
     };
 
     display.setSegments(seg);
